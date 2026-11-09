@@ -1,10 +1,8 @@
 import time
 import logging
 from typing import Optional
-from collections import defaultdict
 from datetime import datetime, timedelta
-from .instruments.options_assests import UNDERLYING_ASSESTS
-
+from bca_iqapi.instruments.options_assests import UNDERLYING_ASSESTS
 
 logger = logging.getLogger(__name__)
 
@@ -149,28 +147,7 @@ def generate_request_id(request_id: Optional[str] = None) -> str:
     return microsecond_part
 
 
-
 def get_asset_id(asset_name: str) -> int:
-    """
-    Get numeric asset ID for trading asset name.
-    
-    Args:
-        asset_name: Trading asset name (e.g., 'EURUSD-op', 'EURUSD-OTC')
-        
-    Returns:
-        Asset ID for API calls
-        
-    Raises:
-        KeyError: If asset not found
-    """
     if asset_name in UNDERLYING_ASSESTS:
         return UNDERLYING_ASSESTS[asset_name]
-    raise KeyError(f'{asset_name} not found!')
-
-
-
-def nested_dict(n, type):
-    if n == 1:
-        return defaultdict(type)
-    else:
-        return defaultdict(lambda: nested_dict(n-1, type))
+    raise KeyError(f"Asset '{asset_name}' not found in underlying assets")

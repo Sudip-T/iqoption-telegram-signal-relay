@@ -1,11 +1,12 @@
 import time
 import logging
 from datetime import datetime, UTC
-from .models import OptionsTradeParams
-from .instruments.options_assests import UNDERLYING_ASSESTS
-from iqoptionapiv2.utilities import get_expiry_timestamp, get_remaining_secs, get_asset_id
+from bca_iqapi.instruments.options_assests import UNDERLYING_ASSESTS
+from bca_iqapi.utilities import *
+from bca_iqapi.state import appstate
+from bca_iqapi.models import OptionsTradeParams
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("api:trade")
 
 
 # Custom exceptions for better error categorization
@@ -25,27 +26,9 @@ class TradeManager:
     Handles trade parameter validation, order execution, confirmation waiting,
     and trade outcome tracking.
     """
-    def __init__(self, websocket_manager, message_handler, account_manager):
+    def __init__(self, websocket_manager, message_handler):
         self.ws_manager = websocket_manager
         self.message_handler = message_handler
-        self.account_manager = account_manager
-
-    def get_asset_id(self, asset_name: str) -> int:
-        """
-        Get numeric asset ID for trading asset name.
-        
-        Args:
-            asset_name: Trading asset name (e.g., 'EURUSD-op', 'EURUSD-OTC')
-            
-        Returns:
-            Asset ID for API calls
-            
-        Raises:
-            KeyError: If asset not found
-        """
-        if asset_name in UNDERLYING_ASSESTS:
-            return UNDERLYING_ASSESTS[asset_name]
-        raise KeyError(f'{asset_name} not found!')
 
     def _place_digital_option_trade(self, asset:str, amount:float, direction:str, expiry:int=1):
         """
@@ -103,16 +86,14 @@ class TradeManager:
                 if isinstance(result, int):
                     # Success: result is order ID
                     expires_in = get_remaining_secs(self.message_handler.server_time, expiry)
-                    # logger.info(f'Order Accepted, ID: {result}, Expires in: {expires_in} Seconds')
+                    logger.info(f'Order Placed, ID: {result}, Expires in: {expires_in} Seconds')
                     return True, result
                 else:
                     # Failure: result is error message
-                    # logger.error(f'Order Execution Failed, Reason: !!! {result} !!!')
                     return False, result
             time.sleep(0.1)
                 
         logger.error(f"Order Confirmation timed out after {timeout} seconds")
-        return False, f"Order Confirmation timed out after {timeout} seconds"
 
 
     def prepare_digital_trade_payload(self, asset: str, amount: float, 
@@ -131,7 +112,7 @@ class TradeManager:
         """
 
         # Get asset ID and calculate expiration timestamp
-        active_id = str(self.get_asset_id(asset))
+        active_id = str(get_asset_id(asset))
         expiration = get_expiry_timestamp(self.message_handler.server_time, expiry)
         date_formatted = datetime.fromtimestamp(expiration, UTC).strftime("%Y%m%d%H%M")
 
@@ -142,7 +123,7 @@ class TradeManager:
             "name": "digital-options.place-digital-option",
             "version": "3.0",
             "body": {
-                "user_balance_id": int(self.account_manager.current_account_id),
+                "user_balance_id": appstate.balance_id,
                 "instrument_id": str(instrument_id),
                 "amount": str(amount),
                 "asset_id": int(active_id),
@@ -178,13 +159,13 @@ class TradeManager:
             raise InvalidTradeParametersError(f"Expiry must be positive integer, got: {expiry}")
         
         # Ensure active account is available
-        if not self.account_manager.current_account_id:
+        if not appstate.balance_id:
             raise TradeExecutionError("No active account available")
         
     def _place_binary_options_trade(self, trade_params:OptionsTradeParams):
         """Place a binary/turbo option trade."""
         try:
-            expiration = get_expiry_timestamp(self.message_handler.server_time, trade_params.expiry)
+            expiration = get_expiry_timestamp(appstate.server_time, trade_params.expiry)
 
             if trade_params.expiry <= 5:
                 option_type_id = 3 # turbo (exp > 5mins )
@@ -194,11 +175,11 @@ class TradeManager:
             msg = {
                     "body":{
                             "price": int(trade_params.amount),
-                            "active_id": int(self.get_asset_id(trade_params.asset)),
+                            "active_id": int(get_asset_id(trade_params.asset)),
                             "expired": int(expiration),
                             "direction": trade_params.direction.value.lower(),
                             "option_type_id": option_type_id,
-                            "user_balance_id": int(self.account_manager.current_account_id)
+                            "user_balance_id": appstate.balance_id
                         },
                     "name": "binary-options.open-option",
                     "version": "1.0"
@@ -233,43 +214,10 @@ class TradeManager:
             # Check if trade is closed
             if order_data:
                 order_data = order_data.to_dict()
-                # logger.info(f"Trade closed - Order IDs: {order_id}, Result: {order_data['result']}, PnL: ${order_data['pl_amount']:.2f}")
-                return True, order_data
+                # logger.info(f"IDs: {order_id} | Result: {order_data['result']}, PnL: ${order_data['pl_amount']:.2f}")
+                return True, order_data, order_data['pl_amount']
             
             time.sleep(.5) # Check every 500ms
 
         # Trade did not close within expected timeframe
         return False, None
-
-
-    def _place_blitz_options_trade(self, trade_params:OptionsTradeParams) -> dict:
-
-        # ── Expiry timestamp ──────────────────────────────────────────
-        server_time = self.message_handler.server_time
-        if server_time == 0:
-            server_time = int(time.time())
-
-        # Align to next full minute boundary + 1 minute safety window
-        expired = (server_time - (server_time % 60)) + 120
-
-        body = {
-            "user_balance_id": int(self.account_manager.current_account_id),
-            "active_id":       int(get_asset_id(trade_params.asset)),
-            "option_type_id":  12,
-            "direction":       trade_params.direction.value.lower(),
-            "expired":         expired,
-            "expiration_size": trade_params.expiry,
-            "refund_value":    0,
-            "price":           float(trade_params.amount),
-            "value":           0,
-            "profit_percent":  0,
-        }
-
-        msg = {
-            "body":body,
-            "name":"binary-options.open-option",
-            "version": "2.0",
-        }
-
-        request_id = self.ws_manager.send_message("sendMessage", msg)
-        return self.wait_for_order_confirmation(request_id, 5)

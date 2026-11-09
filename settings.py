@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
 from dataclasses import dataclass
-from iqoptionapiv2.models import OptionType
+from bca_iqapi.models import OptionType
 from typing import Dict, List, Optional, Tuple
 
 load_dotenv(dotenv_path=os.environ.get('ENV_FILE', '.env'))

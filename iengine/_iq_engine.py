@@ -1,17 +1,8 @@
-"""
-IQ Option Executor that reads from shared queue
-═══════════════════════════════════════════════════════════════════════════
-Reads signals from trade_queue.py every 300ms and executes trades directly.
-No MT4, no JSON bridge file — just queue + direct execution.
-"""
-
 import time
 import logging
 import threading
 from settings import Config
-from iqoptionapiv2.iqclient import IQOptionAPIClient
-from iqoptionapiv2.appstate import appstate, TournamentAccount
-# from ssv2_engine._stats_reporter import StatsReporter, DayTotals
+from bca_iqapi.iqapi import IQOptionClient
 from dataclasses import dataclass
 from typing import Optional
 
@@ -34,7 +25,7 @@ class IQOptionEngine:
         self._lock = threading.Lock()
         self._is_reconnecting = False
         self.max_retries = 2
-        self.client = IQOptionAPIClient(
+        self.client = IQOptionClient(
             self.cfg.IQ_EMAIL, self.cfg.IQ_PASSWORD, self.cfg.IQ_ACCOUNT_TYPE)
         # self._reporter = StatsReporter()  # File-based stats (TXT + CSV)
         # self.day = DayTotals()            # Day-wide accumulator (across sessions)

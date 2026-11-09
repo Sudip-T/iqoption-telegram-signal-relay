@@ -2,28 +2,42 @@ from enum import Enum
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional, Dict, Any
-from iqoptionapiv2.appstate import appstate
-import logging
 
-logger = logging.getLogger(__name__)
-
+class InstrumentType(Enum):
+    """Trading instrument types supported by IQOption API."""
+    FOREX = 'forex'
+    CFD = 'cfd'
+    CRYPTO = 'crypto'
+    DIGITAL_OPTION = 'digital-option'
+    BINARY_OPTION = 'binary'
+    BLITZ_OPTION = 'blitz'
+    TURBO_OPTION = 'turbo'
+    
 class OptionType(Enum):
     DIGITAL_OPTION = "digital-option"
     BINARY_OPTION = "binary-option"
     TURBO_OPTION = "turbo-option"
-    BLITZ_OPTION = "blitz-option"
-    ALL = "all"
 
 class Direction(Enum):
     PUT = "put"
     CALL = "call"
-    INDECISION = 'indecision'
+    INDECISION = 'none'
 
-class ACCOUNTTYPE(Enum):
-    ACCOUNT_REAL = 1
-    ACCOUNT_TOURNAMENT = 2
-    ACCOUNT_DEMO = 4
-    ACCOUNT_CFD = 6
+@dataclass(frozen=True)
+class TradeOpened:
+    option_id: int       # same id that TradeClosed.order_id will carry
+    asset: str           # "EURUSD" / "EURUSD-OTC"
+    is_otc: bool
+    direction: str       # "CALL" / "PUT"
+    expiry_min: float
+ 
+ 
+@dataclass(frozen=True)
+class TradeClosed:
+    order_id: int
+    asset: str
+    direction: str       # "CALL" / "PUT"
+    result: str          # "win" / "loose" / "equal"
 
 @dataclass
 class OptionsTradeParams:
@@ -105,7 +119,6 @@ class TradeOutcomeChecker:
     def __init__(self):
         self.processed_trades = []
 
-
     def check_trade_outcome(self, trade_message: Dict[str, Any]) -> TradeOutcome:
         """
         Process trade message and return standardized outcome
@@ -125,22 +138,9 @@ class TradeOutcomeChecker:
             outcome = self._process_binary_option_outcome(trade_message)
         elif trade_type == OptionType.DIGITAL_OPTION:
             outcome = self._process_digital_option_outcome(trade_message)
-        else:
-            return None
-        
+
         # Store the processed trade
         self.processed_trades.append(outcome)
-
-        if appstate.balance is not None:
-            if outcome.is_win:
-                chg = appstate.balance + outcome.pl_amount
-            elif outcome.is_loss:
-                chg = appstate.balance - outcome.invest_amount  # FIX: Should subtract invest_amount, not pl_amount
-            else:
-                chg = appstate.balance
-            appstate.update(balance=chg)
-        else:
-            logger.warning(f"Balance is None, cannot update for trade {outcome.trade_id}")
 
         return outcome
 

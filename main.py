@@ -6,15 +6,6 @@ import argparse
 import threading
 import signal as signal_module
 
-# ── Path setup ────────────────────────────────────────────────────────────────
-if getattr(sys, 'frozen', False):
-    BASE_DIR = os.path.dirname(sys.executable)
-    sys.path.insert(0, sys._MEIPASS)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-os.environ.setdefault('ENV_FILE', os.path.join(BASE_DIR, '.env'))
-
 # ── Logging setup ─────────────────────────────────────────────────────────────
 
 class TruncateFilter(logging.Filter):
@@ -43,21 +34,18 @@ logging.basicConfig(level=logging.DEBUG, handlers=[_console, _file_handler])
 for _h in logging.root.handlers:
     _h.addFilter(TruncateFilter())
 
-log = logging.getLogger("MT4IQ Signal Bridge Trader")
+# urllib3 DEBUG logs the full request URL — which contains the Telegram bot token
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("requests").setLevel(logging.WARNING)
 
-from iqoptionapiv2.models import Direction
+log = logging.getLogger("IQ Option Telegram Signal Relay")
+
+
 from settings import Config
 from iengine.network_monitor import NetworkMonitor
 from iengine._iq_engine import IQOptionEngine
-
-try:
-    from iengine._errors import register_iq_option_error_handlers
-    register_iq_option_error_handlers()
-except ImportError:
-    error_handler = None
-
-# ── Config singleton ──────────────────────────────────────────────────────────
-config = Config()
+from iengine.telegram_notifier import TelegramNotifier
+from iengine.signal_publisher import SignalPublisher
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -65,13 +53,8 @@ config = Config()
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class IQTournamentTrader:
-    """
-    Connects immediately on start, runs until Ctrl+C or SIGTERM.
-    No scheduling windows — always on.
-    """
-
-    def __init__(self):
-        self.config                            = config
+    def __init__(self, config=None):
+        self.config                            = config or Config()
 
         self._poll_thread: threading.Thread    = None
         self._running                          = False
@@ -79,7 +62,12 @@ class IQTournamentTrader:
         self._start_time: float                = None
 
         self.network_monitor: NetworkMonitor   = None
-        self.executor: IQOptionEngine      = IQOptionEngine(self.config)
+        self.notifier                          = TelegramNotifier(self.config)
+        self.executor: IQOptionEngine          = IQOptionEngine(self.config)
+        self.publisher                         = SignalPublisher(self.notifier)
+        handler = self.executor.client.message_handler
+        handler.on_trade_opened = self.publisher.on_opened
+        handler.on_trade_closed = self.publisher.on_closed
 
     # ── Startup ───────────────────────────────────────────────────────────────
 
@@ -96,7 +84,7 @@ class IQTournamentTrader:
 
         # Wait up to 30 s for IQ Option to connect
         for _ in range(30):
-            if self.executor.client and self.executor.client.is_connected:
+            if self.executor.client and self.executor.client._connected:
                 time.sleep(1)
                 break
             time.sleep(1)
@@ -105,6 +93,7 @@ class IQTournamentTrader:
             return False
 
         self._start_time = time.time()
+        self._alert("🟢 <b>Bot online</b> — IQ Option connected")
         print("")
         return True
 
@@ -123,7 +112,6 @@ class IQTournamentTrader:
             },
         )
         self.network_monitor.start()
-        # self.executor.client.on_new_candle(self.TASignals)
 
         try:
             while self._running:
@@ -137,6 +125,12 @@ class IQTournamentTrader:
         except Exception as e:
             log.error("Poll loop crashed: %s", e, exc_info=True)
 
+    def _alert(self, text: str):
+        """Operational messages go to an ADMIN chat only — never the signals channel."""
+        chat = getattr(self.config, "telegram_admin_chat_id", None)
+        if chat:
+            self.notifier.send(text, chat_id=chat)
+
     # ── Network callbacks ─────────────────────────────────────────────────────
 
     def _on_network_disconnect(self):
@@ -146,17 +140,15 @@ class IQTournamentTrader:
 
     def _on_network_recovery(self):
         log.info("✅ Internet restored")
+        self._alert("✅ Internet restored")
         if self.executor:
             self.executor.resume()
 
     def _reconnect_iq(self):
         log.info("🔄 Reconnecting IQ Option…")
-        self.executor.reconnect()
-        success = self.executor.client.subscribe_live_candles(self.config.active_pairs)
-        if success:
-            self.executor.client.on_new_candle(self.engine.on_new_candle)
-        else:
-            sys.exit(0)
+        ok = self.executor.reconnect()
+        self._alert("🔄 IQ Option reconnected" if ok
+                    else "❌ IQ Option reconnect failed — check the bot")
 
     # ── Shutdown ──────────────────────────────────────────────────────────────
 
@@ -182,6 +174,8 @@ class IQTournamentTrader:
             self._poll_thread.join(timeout=5)
 
         # self._log_session_summary()
+        self._alert("🛑 <b>Bot stopped</b>")
+        self.notifier.close(timeout=10)      # flush queued messages first
         log.info("Shutdown complete")
         sys.exit(0)
 
@@ -203,15 +197,8 @@ class IQTournamentTrader:
         log.info("─" * 50)
 
 
-
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Entry point
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def main():
-    parser = argparse.ArgumentParser(description="MT4IQ Signal Bridge Trader")
+    parser = argparse.ArgumentParser(description="IQ Option Telegram Signal Relay")
     parser.add_argument("--account",  default=None, choices=["PRACTICE", "REAL"],
                         help="Override .env account type")
     parser.add_argument("--disabled", action="store_true",
@@ -219,6 +206,7 @@ def main():
     parser.add_argument("--reverse",  action="store_true",
                         help="Reverse all 60S signals (CALL→PUT, PUT→CALL)")
     args = parser.parse_args()
+    config = Config()
 
     if args.account:
         config.IQ_ACCOUNT_TYPE = args.account.lower()
@@ -226,14 +214,14 @@ def main():
     if args.reverse:
         log.warning("⚠️  --reverse flag active: all 60S signals will be inverted")
 
-    trader = IQTournamentTrader()
+    trader = IQTournamentTrader(config)
 
     signal_module.signal(signal_module.SIGINT,  trader.shutdown)
     signal_module.signal(signal_module.SIGTERM, trader.shutdown)
 
     if not trader.start():
         logging.error("Failed to start — exiting")
-        # sys.exit(1)
+        sys.exit(1)
 
     trader.run()
 

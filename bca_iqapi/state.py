@@ -1,41 +1,10 @@
+import time
 import logging
 from enum import Enum
 from threading import Lock
 from typing import Optional, Tuple
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
-
 logger = logging.getLogger("api:appstate")
-
-
-@dataclass
-class TournamentAccount:
-    """One tournament balance entry (shape matches get_balances() msg items)."""
-    balance_id: int          # 'id' in the payload — the tournament user/balance id
-    tournament_id: int
-    tournament_name: str
-    amount: float
-    rebuy_cost: int = 5
-    currency: str = "USD"
-
-    @classmethod
-    def from_balance_item(cls, item: dict) -> "TournamentAccount":
-        return cls(
-            balance_id=item["id"],
-            tournament_id=item["tournament_id"],
-            tournament_name=item.get("tournament_name", "?"),
-            amount=item.get("amount", 0.0),
-            currency=item.get("currency", "USD"),
-        )
-
-    @staticmethod
-    def parse_all(balance_items: list[dict]) -> list["TournamentAccount"]:
-        """Filter a raw balances list down to tournament accounts (type == 2)."""
-        return [
-            TournamentAccount.from_balance_item(i)
-            for i in balance_items
-            if i.get("type") == 2
-        ]
 
 
 class AccountType(Enum):
@@ -70,6 +39,8 @@ class _AppState:
     is_demo: Optional[bool] = None
 
     profile_msg = None
+    server_time = None
+    # server_time = int(time.time() * 1000)
 
     # Account
     balance_id:      Optional[int]   = None
@@ -79,8 +50,6 @@ class _AppState:
     balance_updated: bool            = False
     account_list = {}
     balance_data = None
-
-    tournament: Optional[TournamentAccount] = None  # active tournament
 
     # Trade results
     result:      Optional[bool] = None
@@ -102,7 +71,6 @@ class _AppState:
                 if not hasattr(self, k):
                     raise AttributeError(f"Unknown state key: {k!r}")
                 setattr(self, k, v)
-            # print('--------------------', self.balance)
 
     def validate_account_type(self, account_type: str, exit_on_error: bool = True):
         """

@@ -1,34 +1,3 @@
-"""
-Per-strategy, per-day CSV trade logger  +  per-strategy stats reporter.
-
-One folder per strategy; inside it:
-
-    trade_journal/{strategy_source}/{YYYY-MM-DD}.csv    (unchanged — raw trades)
-    trade_journal/{strategy_source}/daily_stats.txt     (NEW — live snapshot)
-    trade_journal/{strategy_source}/trading_history.csv (NEW — one row per day)
-
-The stats reporter mirrors ssv2_engine._stats_reporter but is scoped to a
-single strategy: every log_trade() call also refreshes that strategy's
-daily_stats.txt and upserts today's row in its trading_history.csv.
-Day totals are seeded back from trading_history.csv on the first trade of
-the day, so restarts within the same day keep accumulating instead of
-resetting.
-
-Columns of the per-day trade CSV: time, tf, asset, expiry, investment,
-return, compunding_total, running_profit, streak, rebuys, rebuys_remaining
-
-compunding_total is the total payout of THIS trade including the stake
-back — investment + return. "return" alone is just the profit/loss; this
-is what you'd actually have in hand after the trade settles (e.g. $50
-stake + $43 profit = $93 compunding_total on a win; on a loss it's
-whatever's left, i.e. investment + return where return is negative).
-
-"strategy source" comes straight from TradeSignal.source — the name the
-strategy itself stamped on the signal — so if the engine is ever pointed
-at a different strategy (or multiple), each gets its own file and its own
-running profit / streak instead of everything landing in one bucket.
-"""
-
 import csv
 import os
 import re

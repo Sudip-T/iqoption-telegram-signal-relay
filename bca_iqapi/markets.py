@@ -1,20 +1,23 @@
 import time
-import pandas as pd
-from enum import Enum
 import logging
+import pandas as pd
+import mplfinance as mpf
 from typing import List, Dict
-from .instruments.options_assests import UNDERLYING_ASSESTS
+from bca_iqapi.utilities import get_asset_id
+from bca_iqapi.models import InstrumentType
 
 logger = logging.getLogger(__name__)
 
+def _to_seconds(t: int) -> int:
+    """Normalize a UNIX timestamp that may be in ms or s to seconds."""
+    return int(t // 1000) if t > 1_000_000_000_000 else int(t)
 
-class InstrumentType(Enum):
-    """Trading instrument types supported by IQOption API."""
-    FOREX = 'forex'
-    CFD = 'cfd'
-    CRYPTO = 'crypto'
-    DIGITAL_OPTION = 'digital-option'
-    BINARY_OPTION = 'binary-option'
+def is_market_open(schedule: list, server_time: int) -> bool:
+    now = _to_seconds(server_time)
+    return any(
+        int(w[0]) <= now <= int(w[1])
+        for w in schedule if w and len(w) >= 2
+    )
 
 class MarketManager:
     """
@@ -27,23 +30,6 @@ class MarketManager:
         self.ws_manager = websocket_manager
         self.message_handler = message_handler
     
-    def get_asset_id(self, asset_name: str) -> int:
-        """
-        Get numeric asset ID for trading asset name.
-        
-        Args:
-            asset_name: Trading asset name (e.g., 'EURUSD-op', 'EURUSD-OTC')
-            
-        Returns:
-            Asset ID for API calls
-            
-        Raises:
-            KeyError: If asset not found
-        """
-        if asset_name in UNDERLYING_ASSESTS:
-            return UNDERLYING_ASSESTS[asset_name]
-        raise KeyError(f'{asset_name} not found!')
-    
     def get_candle_history(self, asset_name: str, count: int = 50, timeframe: int = 60):
         """
         Get historical candle data for an asset
@@ -53,34 +39,69 @@ class MarketManager:
             count: Number of candles to retrieve
             timeframe: Timeframe of each candle in seconds
         """
-        try:
-            # Reset state and prepare request
-            self.message_handler.candles = None
 
-            name = "sendMessage"
-            msg = {
-                "name": "get-candles",
-                "version": "2.0",
-                "body": {
-                    "active_id": self.get_asset_id(asset_name),
-                    "size": timeframe,
-                    "count": count,
-                    "to": self.message_handler.server_time,
-                    "only_closed": False,
-                    "split_normalization": True
-                }
-            }
-            
-            self.ws_manager.send_message(name, msg)
-            
-            # Wait for response
-            while self.message_handler.candles is None:
-                time.sleep(0.1)
-
-            return self.message_handler.candles
-        except Exception as e:
-            logger.error(e)
+        # Reset state and prepare request
+        self.message_handler.candles = None
         
+        name = "sendMessage"
+        msg = {
+            "name": "get-candles",
+            "version": "2.0",
+            "body": {
+                "active_id": get_asset_id(asset_name),
+                "size": timeframe,
+                "count": count,
+                "to": self.message_handler.server_time,
+                "only_closed": True,
+                "split_normalization": True
+            }
+        }
+        
+        self.ws_manager.send_message(name, msg)
+        
+        # Wait for response
+        while self.message_handler.candles is None:
+            time.sleep(0.1)
+
+        return self.message_handler.candles
+    
+    def plot_candles(self, candles_data=None):
+        """
+        Display candlestick chart using mplfinance.
+        
+        Args:
+            candles_data: Candle data list (uses cached data if None)
+        """
+        if candles_data is None:
+            candles_data = self.message_handler.candles
+        
+        if not candles_data:
+            print("No candle data available")
+            return
+        
+        # Convert and format data
+        df = pd.DataFrame(candles_data)
+        df = df.rename(columns={
+            'open': 'Open',
+            'max': 'High',
+            'min': 'Low',
+            'close': 'Close',
+            'volume': 'Volume'
+        })
+        
+        df['timestamp'] = pd.to_datetime(df['from'], unit='s')
+        df = df.set_index('timestamp')
+        
+        # Create candlestick chart
+        mpf.plot(
+            df,
+            type='candle',
+            style='charles',
+            title='IQOption Candles',
+            ylabel='Price',
+            volume=False
+        )
+    
     def save_candles_to_csv(self, candles_data=None, filename: str = 'candles'):
         """
         Export candle data to CSV file.
@@ -105,7 +126,7 @@ class MarketManager:
         
         df.to_csv(f'{filename}.csv', index=False)
 
-    def _build_msg_body(self, instrument_type:str):
+    def _build_msg_body(self, instrument_type:InstrumentType):
         """
         Construct WebSocket message body for different instrument types.
         
@@ -124,7 +145,7 @@ class MarketManager:
             - Binary options use v4.0 initialization data endpoint
             - Marginal instruments (forex/cfd/crypto) use v1.0 specific endpoints
         """
-        if instrument_type == 'digital-option':
+        if instrument_type == InstrumentType.DIGITAL_OPTION:
             msg = {
                 "name": "digital-option-instruments.get-underlying-list",
                 "version": "3.0",
@@ -132,22 +153,24 @@ class MarketManager:
                     "filter_suspended": True
                 }
             }
-        elif instrument_type == 'binary-option':
+        elif instrument_type in [InstrumentType.BINARY_OPTION, \
+                                 InstrumentType.BLITZ_OPTION, InstrumentType.TURBO_OPTION]:
             msg= {
                 'body':{},
                 'name':'get-initialization-data',
                 'version':'4.0'
             }
-        elif instrument_type in ['forex', 'cfd', 'crypto']:
+        elif instrument_type in [InstrumentType.FOREX, \
+                            InstrumentType.CFD, InstrumentType.CRYPTO]:
             msg = {
                 'body':{},
                 'version':'1.0',
-                'name':f'marginal-{instrument_type}-instruments.get-underlying-list'
+                'name':f'marginal-{instrument_type.value}-instruments.get-underlying-list'
             }
 
         return msg
     
-    def get_underlying_assests(self, instrument_type:str):
+    def get_underlying_assests(self, instrument_type:InstrumentType):
         """
         Retrieve list of available underlying assets for a specific instrument type.
         
@@ -165,12 +188,6 @@ class MarketManager:
             ValueError: If instrument_type is not supported
     
         """
-
-        # Validate instrument type against enum values
-        valid_types = {instrument.value for instrument in InstrumentType}
-        if instrument_type not in valid_types:
-            raise ValueError(f"Unsupported instrument type: {instrument_type}. "
-                           f"Must be one of: {', '.join(valid_types)}")
 
         # Reset state to ensure fresh data
         self.message_handler._underlying_assests = None
@@ -275,7 +292,7 @@ class MarketManager:
             'name': 'candle-generated',
             'params': {
                 'routingFilters': {
-                    'active_id': self.get_asset_id(asset_name),
+                    'active_id': get_asset_id(asset_name),
                     'size': timeframe
                 }
             }
@@ -293,3 +310,80 @@ class MarketManager:
         # # df.set_index('datetime', inplace=True)
         # df.to_csv('candles.csv')
         return df
+
+
+
+    def stream_traders_mood(self, ASSET: str, timeout: float = 5.0):
+        asset_id = get_asset_id(ASSET)
+        name = "subscribeMessage"
+        msg = {
+            "name": "traders-mood-changed",
+            "params":{"routingFilters":
+                        {
+                            "instrument":"turbo-option",
+                            "asset_id":asset_id
+                        }
+                    }
+        }
+        
+        self.ws_manager.send_message(name, msg)
+        
+        deadline = time.monotonic() + timeout
+        # while time.monotonic() < deadline:
+        while True:
+            if asset_id in self.message_handler.traders_mood:
+                return True, f"✅ Trader mood subscribed for {ASSET} (id={asset_id})"
+            time.sleep(0.1)
+
+        return False, f"Timeout after {timeout}s waiting for {ASSET} (id={asset_id})"
+    
+    def stop_traders_mood(self, ASSET: str, timeout: float = 5.0):
+        asset_id = get_asset_id(ASSET)
+        name = "unsubscribeMessage"
+        msg = {
+            "name": "traders-mood-changed",
+            "params":{"routingFilters":
+                        {
+                            "instrument":"turbo-option",
+                            "asset_id":asset_id
+                        }
+                    }
+        }
+        
+        self.ws_manager.send_message(name, msg)
+
+
+    def fetch_active_assets(self, instrument_type:InstrumentType):
+        """
+        Extracts actives status from initialization data.
+        """
+        data = self.get_underlying_assests(instrument_type)
+        server_time = self.message_handler.server_time
+        category_data = data.get(instrument_type.value, {})
+        actives_dict = category_data.get("actives", {})
+        
+        results = {}
+        for active_id, info in actives_dict.items():
+            is_enabled = info.get("enabled", False)
+            is_suspended = info.get("is_suspended", False)
+            schedule = info.get("schedule", [])
+            
+            # Check if currently in an open window
+            market_open = is_market_open(schedule, server_time//1000)
+            market_open = is_enabled and not is_suspended and market_open
+            if not market_open:continue
+
+            # Profit Calculation (100 - commission)
+            commission = info.get("option", {}).get("profit", {}).get("commission", 0)
+            commission = 100 - commission if commission > 0 else 0
+
+            # Detailed Status
+            results[int(active_id)] = {
+                # "name": info.get("name"),
+                "ticker": info.get("ticker"),
+                "is_open": market_open,
+                "profit_percent": commission,
+                # "schedule": schedule
+            }
+
+        return results

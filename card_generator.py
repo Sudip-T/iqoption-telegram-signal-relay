@@ -1,4 +1,4 @@
-# iqoptionapiv2/notifications/card_generator.py
+# cba_iqapi/notifications/card_generator.py
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 
